@@ -1,9 +1,8 @@
-export default async function handler(req, res) {
+const handler = async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: "url required" });
 
   try {
-    // PDFを取得
     const pdfRes = await fetch(url, {
       headers: { "User-Agent": "Mozilla/5.0" }
     });
@@ -12,7 +11,6 @@ export default async function handler(req, res) {
     const buffer = await pdfRes.arrayBuffer();
     const base64 = Buffer.from(buffer).toString("base64");
 
-    // Claude APIにPDFを送って解析
     const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -66,4 +64,6 @@ export default async function handler(req, res) {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
-}
+};
+
+module.exports = handler;
