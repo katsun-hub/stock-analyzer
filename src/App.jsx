@@ -73,48 +73,7 @@ export default function App() {
     setMidConfirmed(false);
 
     try {
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 2000,
-          messages: [{
-            role: "user",
-            content: `以下のURLにある中期経営計画またはIR資料を参照し、最終年度の業績目標からEPSを算出してください。JSONのみで返してください（マークダウン・説明文不要）。
-
-URL: ${pdfUrl}
-
-## 抽出・計算ルール
-
-資料に記載されている業績目標の種類に応じて以下の優先順位で処理してください：
-
-1. **純利益目標がある場合** → そのまま使用（推定不要）
-2. **経常利益目標がある場合** → 純利益 = 経常利益 × 直近実績の純利益率（対経常利益）で推定
-3. **営業利益目標がある場合** → 純利益 = 営業利益 × 直近実績の純利益率（対営業利益）で推定
-4. **売上目標のみの場合** → 営業利益 = 売上 × 直近実績営業利益率、さらに純利益を推定
-
-EPS = 純利益（円） ÷ 発行済み株式数
-
-返すべきJSON:
-{
-  "finalYear": "最終目標年度（例: 2027年3月期）",
-  "targetType": "pure_profit | operating_profit | ordinary_profit | sales のいずれか",
-  "targetValue": "目標値（数値のみ、億円単位）",
-  "targetLabel": "表示用ラベル（例: 純利益目標、営業利益目標）",
-  "netProfit": "最終的に算出した純利益（億円）",
-  "netProfitIsEstimated": true または false,
-  "estimationNote": "推定した場合の計算根拠",
-  "shares": "発行済み株式数（数値のみ、万株単位）",
-  "eps": "算出したEPS（円、小数第1位まで）",
-  "notes": "その他補足事項"
-}
-
-情報が見つからない、またはURLにアクセスできない場合は null を返してください。`
-          }]
-        })
-      });
-
+      const response = await fetch(`/api/extract-pdf?url=${encodeURIComponent(pdfUrl)}`);
       const data = await response.json();
       const text = data.content?.filter(b => b.type === "text").map(b => b.text).join("") || "";
       const clean = text.replace(/```json|```/g, "").trim();
