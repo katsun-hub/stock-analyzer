@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-const fetchStockData = async (code) => {
+const fetchStockPrice = async (code) => {
   try {
     const isJP = /^\d{4}$/.test(code);
     const symbol = isJP ? `${code}.T` : code.toUpperCase();
@@ -13,21 +13,6 @@ const fetchStockData = async (code) => {
     };
   } catch {
     return { price: null, name: null };
-  }
-};
-
-const fetchEpsData = async (code) => {
-  try {
-    const isJP = /^\d{4}$/.test(code);
-    const symbol = isJP ? `${code}.T` : code.toUpperCase();
-    const res = await fetch(`/api/stock?symbol=${symbol}&module=earningsTrend`);
-    const parsed = await res.json();
-    const trend = parsed?.quoteSummary?.result?.[0]?.earningsTrend?.trend;
-    const epsNow = trend?.[0]?.earningsEstimate?.avg?.raw || null;
-    const epsNext = trend?.[1]?.earningsEstimate?.avg?.raw || null;
-    return { epsNow, epsNext };
-  } catch {
-    return { epsNow: null, epsNext: null };
   }
 };
 
@@ -51,105 +36,108 @@ export default function App() {
   const [shikihoEpsNow, setShikihoEpsNow] = useState("");
   const [shikihoEpsNext, setShikihoEpsNext] = useState("");
 
+  const [pdfUrl, setPdfUrl] = useState("");
+  const [midLoading, setMidLoading] = useState(false);
   const [midData, setMidData] = useState(null);
   const [midEps, setMidEps] = useState(null);
-  const [midLoading, setMidLoading] = useState(false);
+  const [midError, setMidError] = useState("");
   const [midConfirmed, setMidConfirmed] = useState(false);
-  const [midNoData, setMidNoData] = useState(false);
 
   const [results, setResults] = useState(null);
   const [aiComment, setAiComment] = useState("");
   const [loadingAI, setLoadingAI] = useState(false);
 
-  const handleDemoMode = () => {
-    setStockName("キーエンス（デモデータ・参考値）");
-    setCurrentPrice("56380");
-    setCompanyEps("1834");
-    setShikihoEpsNow("1820");
-    setShikihoEpsNext("1950");
-    setMidData(null);
-    setMidEps(null);
-    setMidNoData(true);
-    setFetchError("");
-    setResults(null);
-    setMidConfirmed(false);
-  };
-
-  const handleFetchAll = async () => {
+  const handleFetchPrice = async () => {
     if (!code) return;
     setFetching(true);
     setFetchError("");
     setResults(null);
-    setMidData(null);
-    setMidEps(null);
-    setMidConfirmed(false);
-    setMidNoData(false);
 
-    const [stock, eps] = await Promise.all([fetchStockData(code), fetchEpsData(code)]);
-
+    const stock = await fetchStockPrice(code);
     if (!stock.price) {
       setFetchError("株価を取得できませんでした。銘柄コードを確認してください。");
       setFetching(false);
       return;
     }
-
     setCurrentPrice(String(Math.round(stock.price * 10) / 10));
     if (stock.name) setStockName(stock.name);
-    if (eps.epsNow) setCompanyEps(String(Math.round(eps.epsNow * 10) / 10));
-    if (eps.epsNext) setShikihoEpsNext(String(Math.round(eps.epsNext * 10) / 10));
-
     setFetching(false);
-    fetchMidTermPlan(code, stock.name);
   };
 
-  const fetchMidTermPlan = async (code, name) => {
+  const handleExtractMid = async () => {
+    if (!pdfUrl) return;
     setMidLoading(true);
+    setMidData(null);
+    setMidEps(null);
+    setMidError("");
+    setMidConfirmed(false);
+
     try {
-      const companyName = name || `銘柄コード${code}`;
       const response = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
+          max_tokens: 2000,
           messages: [{
             role: "user",
-            content: `「${companyName}」の最新の中期経営計画を検索してください。以下の情報をJSON形式のみで返してください（他のテキスト不要）:
+            content: `以下のURLにある中期経営計画またはIR資料を参照し、最終年度の業績目標からEPSを算出してください。JSONのみで返してください（マークダウン・説明文不要）。
+
+URL: ${pdfUrl}
+
+## 抽出・計算ルール
+
+資料に記載されている業績目標の種類に応じて以下の優先順位で処理してください：
+
+1. **純利益目標がある場合** → そのまま使用（推定不要）
+2. **経常利益目標がある場合** → 純利益 = 経常利益 × 直近実績の純利益率（対経常利益）で推定
+3. **営業利益目標がある場合** → 純利益 = 営業利益 × 直近実績の純利益率（対営業利益）で推定
+4. **売上目標のみの場合** → 営業利益 = 売上 × 直近実績営業利益率、さらに純利益を推定
+
+EPS = 純利益（円） ÷ 発行済み株式数
+
+返すべきJSON:
 {
   "finalYear": "最終目標年度（例: 2027年3月期）",
-  "operatingProfit": "営業利益目標（億円）",
-  "netProfitRatio": "純利益率の目安（対営業利益 %）",
-  "shares": "発行済み株式数（万株）",
-  "source": "参照元URL",
-  "notes": "補足事項があれば"
+  "targetType": "pure_profit | operating_profit | ordinary_profit | sales のいずれか",
+  "targetValue": "目標値（数値のみ、億円単位）",
+  "targetLabel": "表示用ラベル（例: 純利益目標、営業利益目標）",
+  "netProfit": "最終的に算出した純利益（億円）",
+  "netProfitIsEstimated": true または false,
+  "estimationNote": "推定した場合の計算根拠",
+  "shares": "発行済み株式数（数値のみ、万株単位）",
+  "eps": "算出したEPS（円、小数第1位まで）",
+  "notes": "その他補足事項"
 }
-情報が見つからない場合はnullを返してください。`
+
+情報が見つからない、またはURLにアクセスできない場合は null を返してください。`
           }]
         })
       });
+
       const data = await response.json();
       const text = data.content?.filter(b => b.type === "text").map(b => b.text).join("") || "";
-      try {
-        const clean = text.replace(/```json|```/g, "").trim();
-        const parsed = JSON.parse(clean);
-        if (parsed && parsed.operatingProfit) {
-          setMidData(parsed);
-          const op = parseFloat(parsed.operatingProfit) * 100000000;
-          const netRatio = parseFloat(parsed.netProfitRatio) / 100;
-          const shares = parseFloat(parsed.shares) * 10000;
-          if (op && netRatio && shares) {
-            const eps = Math.round((op * netRatio / shares) * 10) / 10;
-            setMidEps(eps);
-          }
+      const clean = text.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(clean);
+
+      if (!parsed || !parsed.netProfit) {
+        setMidError("中計データが見つかりませんでした。URLを確認するか、別の資料を試してください。");
+        setMidLoading(false);
+        return;
+      }
+
+      setMidData(parsed);
+      if (parsed.eps) {
+        setMidEps(parseFloat(parsed.eps));
+      } else {
+        const netProfit = parseFloat(parsed.netProfit) * 100000000;
+        const shares = parseFloat(parsed.shares) * 10000;
+        if (netProfit && shares) {
+          setMidEps(Math.round((netProfit / shares) * 10) / 10);
         }
-      } catch {
-        setMidData(null);
-        setMidNoData(true);
       }
     } catch {
-      setMidData(null);
-      setMidNoData(true);
+      setMidError("データの読み取りに失敗しました。URLが正しいか、またはPDFが公開されているか確認してください。");
     }
     setMidLoading(false);
   };
@@ -213,8 +201,7 @@ ${summary}`
   const inp = (extra = {}) => ({
     style: {
       width: "100%", boxSizing: "border-box",
-      background: "#fff",
-      border: "1.5px solid #e2e8f0",
+      background: "#fff", border: "1.5px solid #e2e8f0",
       borderRadius: 8, padding: "11px 14px",
       color: "#1e293b", fontSize: 15,
       fontFamily: "'Courier New', monospace",
@@ -242,9 +229,10 @@ ${summary}`
     }}>{children}</div>
   );
 
-  const sectionTitle = (text) => (
-    <div style={{ fontSize: 13, fontWeight: 700, color: "#1e293b", letterSpacing: 1, textTransform: "uppercase", marginBottom: 18, paddingBottom: 10, borderBottom: "2px solid #f1f5f9" }}>
-      {text}
+  const sectionTitle = (text, sub) => (
+    <div style={{ marginBottom: 18, paddingBottom: 10, borderBottom: "2px solid #f1f5f9" }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: "#1e293b", letterSpacing: 1, textTransform: "uppercase" }}>{text}</div>
+      {sub && <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>{sub}</div>}
     </div>
   );
 
@@ -255,119 +243,129 @@ ${summary}`
         <div style={{ maxWidth: 860, margin: "0 auto" }}>
           <div style={{ fontSize: 10, letterSpacing: 5, color: "#93c5fd", marginBottom: 4, textTransform: "uppercase" }}>Stock Analysis Tool — TAB 2</div>
           <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, color: "#fff", letterSpacing: 1 }}>目標株価 算出ツール</h1>
-          <p style={{ margin: "6px 0 0", fontSize: 13, color: "#bfdbfe" }}>銘柄コードを入力するだけで株価・EPS・中計データを自動取得し、複数シナリオの目標株価を算出</p>
+          <p style={{ margin: "6px 0 0", fontSize: 13, color: "#bfdbfe" }}>
+            株価を自動取得。EPS・PERを手入力し、中計PDFからAIがデータを抽出して目標株価を算出します。
+          </p>
         </div>
       </div>
 
       <div style={{ maxWidth: 860, margin: "0 auto", padding: "28px 20px" }}>
 
         {card(<>
-          {sectionTitle("① 銘柄コードを入力")}
+          {sectionTitle("① 銘柄コードを入力", "現在株価を自動取得します")}
           <div style={{ display: "flex", gap: 12, alignItems: "flex-end" }}>
             <div style={{ flex: 1 }}>
               {label("銘柄コード / ティッカー", "日本株: 4桁コード（例: 7203）　米国株: ティッカー（例: AAPL）")}
               <input value={code} onChange={e => setCode(e.target.value)}
-                onKeyDown={e => e.key === "Enter" && handleFetchAll()}
+                onKeyDown={e => e.key === "Enter" && handleFetchPrice()}
                 placeholder="例: 7203 または AAPL"
                 {...inp()} />
             </div>
-            <button onClick={handleFetchAll} disabled={fetching} style={{
+            <button onClick={handleFetchPrice} disabled={fetching} style={{
               padding: "11px 28px", background: fetching ? "#93c5fd" : "#1e40af",
               border: "none", borderRadius: 8, color: "#fff",
               fontSize: 14, fontWeight: 700, cursor: fetching ? "not-allowed" : "pointer",
-              whiteSpace: "nowrap", letterSpacing: 1, transition: "background 0.2s",
+              whiteSpace: "nowrap", letterSpacing: 1,
             }}>
-              {fetching ? "取得中..." : "データ取得"}
+              {fetching ? "取得中..." : "株価取得"}
             </button>
           </div>
           {fetchError && <div style={{ fontSize: 12, color: "#ef4444", marginTop: 8 }}>{fetchError}</div>}
-          <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ flex: 1, height: 1, background: "#e2e8f0" }} />
-            <span style={{ fontSize: 12, color: "#94a3b8" }}>または</span>
-            <div style={{ flex: 1, height: 1, background: "#e2e8f0" }} />
-          </div>
-          <button onClick={handleDemoMode} style={{
-            width: "100%", marginTop: 12, padding: "11px 0",
-            background: "#f8fafc", border: "1.5px dashed #cbd5e1",
-            borderRadius: 8, color: "#64748b", fontSize: 13,
-            fontWeight: 600, cursor: "pointer", letterSpacing: 1,
-          }}>
-            🧪 デモモードで試す（キーエンスのサンプルデータで動作確認）
-          </button>
           {stockName && (
             <div style={{ marginTop: 12, padding: "10px 14px", background: "#eff6ff", borderRadius: 8, fontSize: 13, color: "#1e40af", fontWeight: 600 }}>
-              ✓ {stockName}
+              ✓ {stockName}　現在株価: {parseFloat(currentPrice).toLocaleString()} 円
             </div>
           )}
         </>)}
 
-        {currentPrice && card(<>
-          {sectionTitle("② 取得データの確認・編集")}
+        {card(<>
+          {sectionTitle("② 予想EPS・PERを入力", "SBI証券・四季報・バフェットコード等で確認した数値を入力")}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
             <div>
-              {label("現在株価（円）", "自動取得 / 15〜20分遅延")}
-              <input value={currentPrice} onChange={e => setCurrentPrice(e.target.value)} {...inp()} />
+              {label("現在株価（円）", "自動取得済 / 修正可")}
+              <input value={currentPrice} onChange={e => setCurrentPrice(e.target.value)} placeholder="例: 3850" {...inp()} />
             </div>
             <div>
-              {label("予想PER 過去平均（倍）", "SBI証券・バフェットコード等で確認")}
+              {label("予想PER 過去平均（倍）", "バフェットコード・SBI証券で確認")}
               <input value={avgPer} onChange={e => setAvgPer(e.target.value)} placeholder="例: 18.5" {...inp()} />
             </div>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
             <div>
-              {label("会社予想EPS（今期）", "自動取得（要確認）")}
+              {label("会社予想EPS（今期）", "決算短信・会社HP")}
               <input value={companyEps} onChange={e => setCompanyEps(e.target.value)} placeholder="例: 120.5" {...inp()} />
             </div>
             <div>
-              {label("四季報予想EPS（今期）", "手入力 or 自動取得値を修正")}
+              {label("四季報予想EPS（今期）", "四季報・みんかぶ")}
               <input value={shikihoEpsNow} onChange={e => setShikihoEpsNow(e.target.value)} placeholder="例: 115.0" {...inp()} />
             </div>
             <div>
-              {label("四季報予想EPS（来期）", "自動取得（要確認）")}
+              {label("四季報予想EPS（来期）", "四季報・みんかぶ")}
               <input value={shikihoEpsNext} onChange={e => setShikihoEpsNext(e.target.value)} placeholder="例: 140.0" {...inp()} />
             </div>
           </div>
         </>)}
 
-        {currentPrice && card(<>
-          {sectionTitle("③ 中期経営計画ベースEPS")}
-          {midLoading && (
-            <div style={{ padding: "20px 0", textAlign: "center", color: "#64748b", fontSize: 13 }}>
-              🔍 AIが中期経営計画を検索中...
+        {card(<>
+          {sectionTitle("③ 中期経営計画 / IR資料からEPSを算出", "PDFのURLを貼るとAIが自動で数値を読み取ります")}
+          <div style={{ padding: "12px 16px", background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 8, marginBottom: 16, fontSize: 12, color: "#0369a1" }}>
+            💡 会社のIRページから中期経営計画PDFのURLをコピーして貼り付けてください。決算短信・有価証券報告書のURLでもOKです。純利益・経常利益・営業利益・売上高のいずれの目標値からでも自動でEPSを算出します。
+          </div>
+          <div style={{ display: "flex", gap: 12, alignItems: "flex-end", marginBottom: 16 }}>
+            <div style={{ flex: 1 }}>
+              {label("IR資料・中計PDFのURL")}
+              <input value={pdfUrl} onChange={e => setPdfUrl(e.target.value)}
+                placeholder="例: https://www.example.co.jp/ir/library/mid_term_plan.pdf"
+                {...inp()} />
+            </div>
+            <button onClick={handleExtractMid} disabled={midLoading || !pdfUrl} style={{
+              padding: "11px 20px", background: midLoading ? "#93c5fd" : "#0369a1",
+              border: "none", borderRadius: 8, color: "#fff",
+              fontSize: 13, fontWeight: 700, cursor: midLoading ? "not-allowed" : "pointer",
+              whiteSpace: "nowrap",
+            }}>
+              {midLoading ? "読込中..." : "AIで抽出"}
+            </button>
+          </div>
+
+          {midError && (
+            <div style={{ padding: "12px 16px", background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, fontSize: 12, color: "#c2410c" }}>
+              ⚠️ {midError}
             </div>
           )}
-          {!midLoading && midData && (
+
+          {midData && (
             <div>
-              <div style={{ padding: 16, background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 8, marginBottom: 16 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: "#0369a1", marginBottom: 12 }}>AIが取得した中計データ（要確認）</div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: 13 }}>
+              <div style={{ padding: 16, background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 8, marginBottom: 12 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#0369a1", marginBottom: 12 }}>AIが抽出したデータ（必ず確認してください）</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: 13, marginBottom: 10 }}>
                   {[
                     ["最終目標年度", midData.finalYear],
-                    ["営業利益目標", `${midData.operatingProfit}億円`],
-                    ["純利益率（対営業利益）", `${midData.netProfitRatio}%`],
-                    ["発行済み株式数", `${midData.shares}万株`],
+                    [midData.targetLabel || "業績目標", `${midData.targetValue} 億円`],
+                    ["算出した純利益", `${midData.netProfit} 億円${midData.netProfitIsEstimated ? " ⚠️推定" : " ✓直接記載"}`],
+                    ["発行済み株式数", `${midData.shares} 万株`],
                   ].map(([k, v]) => (
-                    <div key={k} style={{ padding: "6px 10px", background: "#fff", borderRadius: 6, border: "1px solid #e0f2fe" }}>
-                      <span style={{ color: "#64748b", fontSize: 11 }}>{k}：</span>
-                      <span style={{ color: "#1e293b", fontWeight: 600 }}>{v || "取得できず"}</span>
+                    <div key={k} style={{ padding: "8px 12px", background: "#fff", borderRadius: 6, border: "1px solid #e0f2fe" }}>
+                      <div style={{ fontSize: 10, color: "#64748b", marginBottom: 2 }}>{k}</div>
+                      <div style={{ color: "#1e293b", fontWeight: 600 }}>{v || "取得できず"}</div>
                     </div>
                   ))}
                 </div>
-                {midData.source && (
-                  <div style={{ marginTop: 10, fontSize: 11, color: "#94a3b8" }}>
-                    参照元: <a href={midData.source} target="_blank" rel="noreferrer" style={{ color: "#3b82f6" }}>{midData.source}</a>
+                {midData.netProfitIsEstimated && midData.estimationNote && (
+                  <div style={{ padding: "8px 12px", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 6, fontSize: 11, color: "#92400e", marginBottom: 8 }}>
+                    ⚠️ 推定計算: {midData.estimationNote}
                   </div>
                 )}
-                {midData.notes && <div style={{ marginTop: 8, fontSize: 12, color: "#64748b" }}>📌 {midData.notes}</div>}
+                {midData.notes && <div style={{ fontSize: 11, color: "#64748b" }}>📌 {midData.notes}</div>}
               </div>
               {midEps && (
-                <div style={{ padding: "14px 18px", background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 8, marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div style={{ padding: "14px 18px", background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                   <div>
-                    <span style={{ fontSize: 12, color: "#16a34a" }}>算出された中計ベースEPS：</span>
-                    <span style={{ fontSize: 22, color: "#15803d", fontFamily: "'Courier New', monospace", marginLeft: 10, fontWeight: 700 }}>{midEps} 円</span>
+                    <div style={{ fontSize: 11, color: "#16a34a", marginBottom: 4 }}>算出された中計ベースEPS</div>
+                    <span style={{ fontSize: 24, color: "#15803d", fontFamily: "'Courier New', monospace", fontWeight: 700 }}>{midEps} 円</span>
                   </div>
                   <button onClick={() => setMidConfirmed(v => !v)} style={{
-                    padding: "8px 18px",
+                    padding: "10px 20px",
                     background: midConfirmed ? "#16a34a" : "#fff",
                     border: `2px solid ${midConfirmed ? "#16a34a" : "#e2e8f0"}`,
                     borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 700,
@@ -379,33 +377,21 @@ ${summary}`
               )}
             </div>
           )}
-          {!midLoading && midNoData && (
-            <div style={{ padding: "14px 18px", background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: "#c2410c", marginBottom: 4 }}>⚠️ 中計データを取得できませんでした</div>
-              <div style={{ fontSize: 12, color: "#9a3412" }}>
-                中期経営計画が非公表、または業績目標の記載が見つかりませんでした。<br />
-                中計ベースEPSなしで目標株価を算出します。
-              </div>
-            </div>
-          )}
         </>)}
 
-        {currentPrice && (
-          <button onClick={calcResults} style={{
-            width: "100%", padding: 16,
-            background: "#1e40af", border: "none", borderRadius: 10,
-            color: "#fff", fontSize: 15, fontWeight: 700,
-            letterSpacing: 2, textTransform: "uppercase",
-            cursor: "pointer", marginBottom: 24,
-            boxShadow: "0 4px 12px rgba(30,64,175,0.3)",
-            transition: "background 0.2s",
-          }}
-            onMouseEnter={e => e.target.style.background = "#1d4ed8"}
-            onMouseLeave={e => e.target.style.background = "#1e40af"}
-          >
-            目標株価を算出する
-          </button>
-        )}
+        <button onClick={calcResults} style={{
+          width: "100%", padding: 16,
+          background: "#1e40af", border: "none", borderRadius: 10,
+          color: "#fff", fontSize: 15, fontWeight: 700,
+          letterSpacing: 2, textTransform: "uppercase",
+          cursor: "pointer", marginBottom: 24,
+          boxShadow: "0 4px 12px rgba(30,64,175,0.3)",
+        }}
+          onMouseEnter={e => e.target.style.background = "#1d4ed8"}
+          onMouseLeave={e => e.target.style.background = "#1e40af"}
+        >
+          目標株価を算出する
+        </button>
 
         {results && (<>
           <div style={{ fontSize: 12, letterSpacing: 4, color: "#64748b", marginBottom: 16, textTransform: "uppercase", textAlign: "center" }}>
@@ -437,6 +423,7 @@ ${summary}`
               </div>
             ))}
           </div>
+
           <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #e2e8f0", padding: 24, boxShadow: "0 1px 4px rgba(0,0,0,0.06)" }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: "#1e40af", letterSpacing: 2, textTransform: "uppercase", marginBottom: 14 }}>▸ AI 総合コメント</div>
             {loadingAI ? (
@@ -445,6 +432,7 @@ ${summary}`
               <div style={{ fontSize: 14, color: "#374151", lineHeight: 1.9 }}>{aiComment}</div>
             )}
           </div>
+
           <p style={{ fontSize: 11, color: "#94a3b8", marginTop: 16, textAlign: "center", lineHeight: 1.8 }}>
             ※ 本ツールは参考情報の提供を目的としており、投資勧誘ではありません。投資判断はご自身の責任で行ってください。<br />
             株価データは15〜20分遅延があります。
